@@ -6,15 +6,11 @@ It is meant for explicit delegation—it will not jump in on normal coding or re
 
 ## Install
 
-Works with agents that follow the [Agent Skills](https://agentskills.io) format (Claude Code, Codex, Cursor, VS Code / GitHub Copilot, Antigravity, Gemini CLI, OpenCode, and others).
+Works with coding agents that support the [Agent Skills](https://agentskills.io) format (Claude Code, Codex, Cursor, VS Code / GitHub Copilot, Antigravity, Gemini CLI, OpenCode, and others).
 
-```bash
-npx skills add zhm9484/codex-use
-```
+Tell your agent:
 
-Or just tell your agent:
-
-> Install the skill from https://github.com/zhm9484/codex-use
+> Install the `codex-use` skill from https://github.com/zhm9484/codex-use
 
 ## Usage
 
