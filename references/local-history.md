@@ -1,220 +1,110 @@
-# Local history: verified data map and queries
+# Local history: storage facts and the history client
 
 Verified on 2026-11-27 with CLI 0.167.2, App Server daemon 0.172.0 and existing
-desktop history. These are fixed reference facts and query templates, not a checklist
-to rediscover each time. Only investigate schemas again if a query fails or storage
-behavior changes. Resolve `CODEX_HOME`, falling back to `~/.codex`; do not hardcode a
-username. The templates use only the Python standard library (`sqlite3`); they are
-independent of the Node.js control client.
+desktop history. These are reference facts, not a checklist to rediscover each time.
+`H` is this skill's `scripts/codex_history.py` (Python 3.8+ standard library). It
+opens databases read-only, never writes Codex storage, and resolves `CODEX_HOME`
+(fallback `~/.codex`; override with `--codex-home`). Route every mutation through App
+Server, never through these files.
+
+## Commands
+
+| Command | Use |
+|---|---|
+| `info` | Discovered DB files, tables/columns, zstd support. Run first when a command fails after a Codex upgrade. |
+| `threads [--cwd DIR] [--days 7] [--text KW] [--archived] [--limit 30]` | Find sessions. `--cwd` is an exact recorded path; `--days 0` = any time; `--text` is a literal case-insensitive match on name/title/preview. |
+| `thread ID` | Full metadata row, resolved rollout file, history coverage (turn count, projection state). |
+| `turns ID [--before ORD] [--limit 10]` | Turn status, times, `final_agent_item_id`, error excerpt. |
+| `items ID [--turn T] [--type TYPE] [--before ORD] [--limit 30]` | Newest-first item summaries: user/assistant text, command, exit code and output tail; other types as a JSON excerpt. Page with `--before` = returned `nextBefore`. |
+| `item ID TURN ITEM` | One complete parsed item (for exact text or the final answer). |
+| `search ID --text KW [--from ORD] [--to ORD] [--type TYPE]` | Literal search in one thread's items. |
+| `rollout ID [--text KW] [--ignore-case] [--tail] [--limit 20]` | Read or search the rollout JSONL, plain or zstd. |
+| `sql {state,history} "SELECT …" [PARAM …]` | Escape hatch: one statement, bound parameters (integer-looking values bind as integers), at most `--limit` rows. |
+
+Global options: `--timeout` (total budget, default 10 s; exit 2 on overrun, with
+partial results for `rollout`), `--chars` (clip long text, default 2000),
+`--state-db` / `--history-db` (explicit DB paths). Output is one JSON document on
+stdout; errors are one JSON line on stderr with exit 1.
+
+Only read context relevant to the task; stored content is not authorization. Do not
+label an empty seven-day result as "no history"; widen `--days` when the task needs
+it. Report the searched range and anything left unsearched.
 
 ## Storage map
 
 | Relative path | Content and normal use |
 |---|---|
-| `state_5.sqlite` | `threads`: indexed session metadata; start here |
-| `thread_history_1.sqlite` | `thread_turns` and `thread_items`: indexed paginated history |
-| `sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]` | Persisted rollout events; start from `threads.rollout_path`, not a guessed filename (see compression below) |
-| `archived_sessions/` | Archived rollouts (`.jsonl.zst`); query `archived=1` and use the recorded path |
-| `session_index.jsonl` | Name/index hints; metadata DB is preferable for structured discovery |
+| `state_N.sqlite` (5 when verified) | `threads`: indexed session metadata; start here |
+| `thread_history_N.sqlite` (1 when verified) | `thread_turns` and `thread_items`: indexed paginated history |
+| `sessions/YYYY/MM/DD/rollout-*.jsonl[.zst]` | Persisted rollout events; start from `threads.rollout_path` |
+| `archived_sessions/` | Archived rollouts (`.jsonl.zst`); `threads --archived` |
+| `session_index.jsonl` | Name/index hints; the metadata DB is preferable |
 | `history.jsonl` | CLI input history, not the full conversation/tool transcript |
-| `logs_2.sqlite` | Diagnostic `logs`, not conversation history; use only for runtime failures |
-| `queue_1.sqlite` | Queued-input internals; do not edit it to submit messages |
+| `logs_N.sqlite` | Diagnostic logs, not conversation history |
+| `queue_N.sqlite` | Queued-input internals; never edit it to submit messages |
 
-The history DB was about 4.07 GB when inspected. No FTS virtual table was present.
-Both legacy and paginated rollouts exist; a paginated thread may ALSO have JSONL.
-`thread_history_projection_state` tracks projection progress, so absence from the
-history DB is not conclusive absence from the rollout. Disk state may lag live work.
-Read metadata/history directly, but route every mutation through App Server.
+The numeric suffix changes with storage migrations, so the client picks the highest
+`state_*.sqlite` and `thread_history_*.sqlite` it finds and selects only columns that
+exist. The history DB was about 4.07 GB when inspected and has no full-text index:
+always scope text searches to one thread (and an ordinal range for long threads).
 
-## Known schema
+Disk state may lag live work. `thread_history_projection_state` tracks how far a
+rollout has been projected into the history DB, so absence from the history DB is not
+conclusive absence from the rollout; use `rollout` to check. All 2884 local threads
+were `history_mode=paginated` when inspected; older `legacy` threads may exist only
+as rollout JSONL.
 
-`state_5.sqlite.threads` useful columns:
-
-- `id` TEXT primary key: target thread UUID. Do not confuse with a session-tree ID.
-- `name`, `title`, `preview`, `first_user_message`: naming and discovery hints.
-- `cwd`, `source`, `thread_source`, `originator`, `cli_version`.
-- `created_at`, `updated_at`, `recency_at`: epoch seconds; corresponding `_ms`
-  columns contain milliseconds (older rows may have null ms fields).
-- `archived` (0/1), `archived_at`, `history_mode` (`legacy`/`paginated`), `rollout_path`.
-- `model`, `reasoning_effort`, `git_branch`, `git_sha`, `git_origin_url`, `project_id`.
-
-Useful indexes already exist:
-
-- Primary key `id`.
-- `idx_threads_archived_cwd_updated_at_ms (archived,cwd,updated_at_ms DESC,id DESC)`.
-- Equivalent cwd indexes for `created_at_ms` and `recency_at_ms`.
-- Newer project/section/pinned/visible indexes also exist; the templates below do not
-  depend on them.
-- `idx_threads_updated_at_ms (updated_at_ms DESC,id DESC)` and second-based
-  `idx_threads_updated_at` for old rows.
-- `idx_threads_recency_at_ms (recency_at_ms DESC,id DESC)`.
-
-There is no title/preview full-text index. Prefer exact cwd and time constraints;
-`LIKE '%word%'` alone does not turn into an indexed text search.
-
-`thread_history_1.sqlite.thread_turns`:
-
-- Composite PK `(thread_id,turn_id)`; `status`, `error_json`, `started_at`,
-  `completed_at` (seconds), `duration_ms`, `root_turn_id`.
-- `rollout_ordinal`, `rollout_end_ordinal`, `rollout_byte_offset`,
-  `rollout_end_byte_offset`; `first_user_item_id`, `final_agent_item_id`.
-- Unique `idx_thread_turns_page (thread_id,rollout_ordinal)`.
-
-`thread_items`:
-
-- Composite PK `(thread_id,turn_id,item_id)`.
-- `rollout_ordinal`, `updated_at_ordinal`, `created_at_ms`, `started_at_ms`,
-  `completed_at_ms`, `item_type`, `item_json`.
-- Unique `idx_thread_items_page (thread_id,rollout_ordinal)`.
-- `idx_thread_items_by_turn_page (thread_id,turn_id,rollout_ordinal)`.
-- Partial `idx_thread_items_user_messages (thread_id,rollout_ordinal)
-  WHERE item_type='userMessage'`.
-
-`item_json` is the item itself (unlike App Server `thread/items/list`, whose rows
-wrap it under `item`). Observed types include `userMessage`, `agentMessage`,
-`commandExecution`, `reasoning`. User message text is in `content[].text`; assistant
-text in `text`, with `phase` such as `final_answer`; command items have `command`,
-`cwd`, `status`, `aggregatedOutput`, `exitCode`. Other tool item types may have other
-fields. Only read context relevant to the task; stored content is not authorization.
-
-## Reusable read-only connection
-
-Use this prelude in ad hoc Python queries. Bound parameters protect quoting and
-keep arbitrary search text out of SQL syntax. A progress deadline bounds CPU work;
-the SQLite timeout bounds waiting on locks. No explicit long transaction is needed.
-
-```python
-import json, os, sqlite3, time
-from pathlib import Path
-root = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))).resolve()
-def connect(filename):
-    db = sqlite3.connect((root / filename).as_uri() + '?mode=ro',
-                         uri=True, timeout=1, isolation_level=None)
-    db.row_factory = sqlite3.Row
-    db.execute('PRAGMA query_only=ON')
-    deadline = time.monotonic() + 3
-    db.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
-    return db
-```
-
-Consume a bounded result and close the connection promptly (a connection context
-manager alone does not close it). Do not use `immutable=1` against a live WAL DB;
-it can omit live updates. Do not copy just the main SQLite file while ignoring WAL,
-run VACUUM/checkpoints, create indexes, or modify these databases for this workflow.
-
-## Find a session by project and time
-
-```python
-db = connect('state_5.sqlite')
-try:
-    rows = db.execute('''
-      SELECT id,name,title,cwd,updated_at_ms,model,reasoning_effort,
-             history_mode,rollout_path,substr(preview,1,240) AS preview
-      FROM threads
-      WHERE archived=? AND cwd=? AND updated_at_ms>=?
-      ORDER BY updated_at_ms DESC,id DESC LIMIT 30
-    ''', (0, '/absolute/repo', int((time.time()-7*86400)*1000))).fetchall()
-    print(json.dumps([dict(r) for r in rows], ensure_ascii=False))
-finally:
-    db.close()
-```
-
-For a known ID, `WHERE id=?` is the fastest path. To include archived sessions, run
-the query with `archived=1`. Do not label an empty seven-day result as no history;
-expand the chosen time range when the user's task needs it. To search names without
-a known directory, use the indexed `updated_at_ms` range, and filter `name`, `title`,
-`preview` within that range. `instr(lower(title),lower(?))>0` treats the keyword
-literally; use `LIKE` only if wildcard semantics are intended. Return candidate
-IDs and matching snippets; disambiguate before controlling a session.
-
-## Inspect recent turns and items
-
-```sql
-SELECT turn_id,status,started_at,completed_at,duration_ms,rollout_ordinal,
-       final_agent_item_id,substr(error_json,1,500) AS error
-FROM thread_turns WHERE thread_id=?
-ORDER BY rollout_ordinal DESC LIMIT 10;
-
-SELECT turn_id,item_id,item_type,rollout_ordinal,created_at_ms,
-       substr(item_json,1,2000) AS excerpt
-FROM thread_items WHERE thread_id=?
-ORDER BY rollout_ordinal DESC LIMIT 30;
-```
-
-The excerpt is a text preview, NOT necessarily valid JSON. For exact inspection,
-select `item_json` for a known `(thread_id,turn_id,item_id)`, then `json.loads` it.
-For the final response, use the turn's `final_agent_item_id` and composite PK.
-For full bounded items, select `item_json` in place of the excerpt. Tool outputs can
-be large, so avoid doing that for dozens of unrelated command items.
-
-Next page (keyset pagination, no large OFFSET):
-
-```sql
-SELECT turn_id,item_id,item_type,rollout_ordinal,substr(item_json,1,2000) AS excerpt
-FROM thread_items WHERE thread_id=? AND rollout_ordinal<?
-ORDER BY rollout_ordinal DESC LIMIT 30;
-```
-
-For a particular turn add `AND turn_id=?`; its existing index serves that query.
-For user instructions add `AND item_type='userMessage'`, matching the partial index.
-
-## Search message/tool text within a chosen scope
-
-Choose a thread and ordinal interval from recent-item results, then:
-
-```sql
-SELECT turn_id,item_id,item_type,rollout_ordinal,
-       substr(item_json,max(1,instr(lower(item_json),lower(?))-160),600) AS snippet
-FROM thread_items
-WHERE thread_id=? AND rollout_ordinal>=? AND rollout_ordinal<?
-  AND instr(lower(item_json),lower(?))>0
-ORDER BY rollout_ordinal DESC LIMIT 20;
-```
-
-Bind `(keyword, thread_id, lower_ordinal, upper_ordinal, keyword)`. This is a raw
-JSON text match, not semantic search; keys can also match, and escaped text may need
-JSON decoding. For precise user/assistant text, fetch a bounded set of message items
-and search decoded strings in Python. Report the searched ordinal interval and any
-unsearched history. `LIMIT` bounds output, not scan cost; the thread/range conditions
-bound the work. Avoid global `LIKE` across the multi-GB `item_json` column.
-
-## JSONL fallback and targeted text searches
-
-Start from the exact `rollout_path` returned by metadata. New names may include
-additional IDs; do not reconstruct the filename from thread ID alone.
+## Rollout files and compression
 
 Codex compresses older rollouts with zstd but does NOT update `rollout_path`: on
 2026-11-27, 2813 of 2884 rows pointed at a `.jsonl` path whose file existed only as
 `<rollout_path>.zst` (all archived rows, and unarchived rows last updated a week or
-more earlier).
-Resolve the file in this order: `rollout_path`, then `rollout_path + '.zst'`; report
-it missing only when neither exists. For a small, known file:
+more earlier). The client resolves the file automatically (`state`: `plain`, `zstd`
+or `missing`) and decompresses with Python 3.14's `compression.zstd` or, on older
+Python, the `zstd` command. Without either, it reports that clearly; plain rollouts
+and all SQLite queries still work.
+
+JSONL lines have `timestamp`, optional `ordinal`, `type` (`session_meta`,
+`event_msg`, `response_item`, …) and `payload` (sometimes `metadata`); the client
+reports these per match. `session_meta.payload` carries ID/cwd/version/history mode
+and may carry `history_base`: forks can inherit history from another rollout, so one
+file is not necessarily the whole logical conversation. Use App Server pagination
+when a local slice is incomplete. Decompressed rollouts reached 322 MB; a scan reads
+the whole file unless `--limit` is reached first, bounded by `--timeout`.
+
+## Schema facts for `sql`
+
+`state_N.sqlite.threads`: `id` (target thread UUID, not a session-tree ID), `name`,
+`title`, `preview`, `first_user_message`, `cwd`, `source`, `thread_source`,
+`originator`, `cli_version`, `created_at`/`updated_at`/`recency_at` (seconds) with
+`_ms` twins, `archived`, `archived_at`, `history_mode`,
+`rollout_path`, `model`, `reasoning_effort`, `git_branch`, `git_sha`,
+`git_origin_url`, `project_id`. Indexes include `(archived,cwd,updated_at_ms DESC,id
+DESC)`, the same for `created_at_ms`/`recency_at_ms`, and `(updated_at_ms DESC,id
+DESC)`.
+
+`thread_history_N.sqlite.thread_turns`: PK `(thread_id,turn_id)`; `status`,
+`error_json`, `started_at`, `completed_at` (seconds), `duration_ms`, `root_turn_id`,
+`rollout_ordinal`, `rollout_end_ordinal`, byte offsets into the uncompressed rollout,
+`first_user_item_id`, `final_agent_item_id`. Index `(thread_id,rollout_ordinal)`.
+
+`thread_items`: PK `(thread_id,turn_id,item_id)`; `rollout_ordinal`,
+`updated_at_ordinal`, `created_at_ms`, `started_at_ms`, `completed_at_ms`,
+`item_type`, `item_json`. Indexes `(thread_id,rollout_ordinal)`,
+`(thread_id,turn_id,rollout_ordinal)` and a partial index on user messages.
+`item_json` is the item itself (App Server `thread/items/list` wraps it under `item`).
+User text is in `content[].text`; assistant text in `text` with `phase` such as
+`final_answer`; command items have `command`, `cwd`, `status`, `aggregatedOutput`,
+`exitCode`. Other item types have other fields.
+
+Keep `sql` queries keyed by `thread_id` (plus `rollout_ordinal` ranges): a global
+`LIKE`/`instr` over `item_json` scans gigabytes and will hit the timeout. Example:
 
 ```bash
-ROLLOUT="$P"; [ -f "$ROLLOUT" ] || ROLLOUT="$P.zst"
-rg -z -n -F -m 20 --max-columns 500 --max-columns-preview -- 'literal keyword' "$ROLLOUT"
+python3 "$H" sql history "SELECT turn_id,status,duration_ms FROM thread_turns
+  WHERE thread_id=? AND status<>? ORDER BY rollout_ordinal DESC LIMIT 5" THREAD_ID completed
 ```
 
-`rg -z` decompresses `.zst` through the `zstd` binary; without `rg`, use
-`zstd -dc "$ROLLOUT" | grep -n -F -m 20 -- 'literal keyword'`. `-m` limits matching
-lines, not bytes scanned. A negative match can still read the whole file. For large
-plain files use a known byte interval from `thread_turns` or a bounded recent tail
-first. Those byte offsets refer to uncompressed JSONL, so a `.zst` file cannot be
-seeked: stream-decompress and stop early, or prefer the SQLite history and App Server
-pagination. Do not recursively scan all sessions by default. JSONL lines
-observed here have `timestamp`, optional `ordinal`, `type`, and `payload` (sometimes
-`metadata`). Types include `session_meta`, `event_msg`, and `response_item`.
-
-`session_meta.payload` contains ID/cwd/version/history_mode and may contain
-`history_base`. Forks can inherit history from another rollout: inspect that metadata
-or use App Server history pagination when a local slice is incomplete; do not assume
-one file is the entire logical conversation. Line schemas vary; parse JSON when
-roles/types/escaped text matter. Never treat a truncated line as a complete JSON object.
-
-## Only when a template stops working
-
-Inspect `sqlite_master`, `PRAGMA table_info(threads)` / `table_info(thread_items)` and
-`PRAGMA index_list(...)` read-only. Use `EXPLAIN QUERY PLAN` for the actual slow query.
-The templates above were checked against the existing indexes; do not redo this
-exploration on every invocation. SQLite status is persisted history, not live runtime
-ownership: use the control script's `status` before follow-up/steer/interrupt.
+If a query fails after an upgrade, run `info` and adapt; do not copy, vacuum,
+checkpoint, index or otherwise modify these databases, and do not open a live WAL
+database with `immutable=1`.

@@ -3,35 +3,34 @@
 Verified against Codex CLI 0.167.2 with App Server daemon 0.172.0 on 2026-11-27.
 Protocol is experimental; keep CLI and daemon versions compatible. Do not generate
 schemas on every call. If an upgrade breaks the client, generate the schema with the
-daemon's own binary and update only the affected calls:
+daemon's own binary (it can be newer than the `codex` on PATH; `managedCodexPath` in
+`codex app-server daemon version` names it) and update only the affected calls:
 
 ```bash
-D="$(codex app-server daemon version | node -pe 'JSON.parse(require("fs").readFileSync(0)).managedCodexPath')"
-"$D" app-server generate-json-schema --experimental --out /temporary/directory
+"$MANAGED_CODEX" app-server generate-json-schema --experimental --out /temporary/directory
 ```
 
-The daemon runs its own managed binary, which can be newer than the `codex` on PATH
-(observed: CLI 0.167.2, daemon 0.172.0). Official protocol:
-https://learn.chatgpt.com/docs/app-server
+Official protocol: https://learn.chatgpt.com/docs/app-server
 
 ## Connection and lifetime
 
 The default endpoint is
-`${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock`.
-`codex app-server daemon start` starts the shared service if needed.
-`codex app-server daemon version` reports CLI and daemon versions. Do not restart,
+`${CODEX_HOME:-$HOME/.codex}/app-server-control/app-server-control.sock`. If that
+file is absent and `--sock` is not given, the client asks
+`codex app-server daemon version` for its `socketPath` before failing.
+`codex app-server daemon start` starts the shared service if needed. Do not restart,
 update or stop a shared service while unrelated work is running.
 
-The Node.js client uses only built-in modules: an HTTP Upgrade handshake over the Unix
-socket (no public TCP port), then masked RFC 6455 text frames carrying JSON-RPC. It
-answers pings and reassembles fragmented messages. `codex app-server proxy` is a raw
-byte proxy; it is NOT a JSONL RPC adapter. Do not send newline-delimited JSON directly
-to that socket.
+The client implements the WebSocket protocol itself with the standard library: an
+HTTP Upgrade handshake over the Unix socket (no public TCP port), then masked RFC
+6455 text frames carrying JSON-RPC. It answers pings and reassembles fragmented
+messages. `codex app-server proxy` is a raw byte proxy; it is NOT a JSONL RPC adapter.
+Do not send newline-delimited JSON directly to that socket.
 
-Override the owning endpoint with the global option:
+Override the owning endpoint with the global option before the subcommand:
 
 ```bash
-node "$S" --sock /absolute/other.sock status THREAD_ID
+python3 "$S" --sock /absolute/other.sock status THREAD_ID
 ```
 
 The shared daemon retains active work after this short-lived client disconnects.
@@ -41,15 +40,13 @@ imply control of a desktop or independent server's active thread. `notLoaded` me
 not loaded in THIS server, not proof it is idle everywhere. Do not resume a known
 externally active thread on a different server; connect to its owner instead.
 
-Runtime check: `node --version` must report 18 or later. No `npm install` is needed.
-
 ## Commands and behavior
 
 - `models`: paginates `model/list`, prints IDs, default/supported efforts.
 - `start`: `thread/start`, optional `thread/name/set`, then `turn/start`. Requires
   `--cwd`, `--kind`, and either `--message` or `--task-file` (`-` reads stdin).
-  Optional `--model`, `--effort`, `--name`, `--sandbox`. Local inputs (cwd, task text)
-  are validated before connecting.
+  Optional `--model`, `--effort`, `--name`, `--sandbox`. Local inputs (cwd, UTF-8
+  task text) are validated before connecting.
 - `follow-up ID`: checks idle state, `thread/resume`, validates effective model/effort,
   then `turn/start`. Accepts task input and optional model/effort overrides. It does
   not queue work. Serialize writes to the same thread; an external concurrent sender
@@ -64,9 +61,9 @@ Runtime check: `node --version` must report 18 or later. No `npm install` is nee
   output. `olderItemsCursor` indicates additional older items. Pin the turn ID to
   avoid accidentally waiting for someone else's subsequent turn. Timeout is 0–60 s.
 
-`--effort` accepts any value the server catalog advertises for the model (currently
-`low`…`max`, plus `ultra` on most models); unsupported values are rejected before any
-mutation. An option value starting with `-` must use the `--message=-text` form.
+`--effort` accepts any value the server catalog advertises for the model; other
+values are rejected before any mutation. An option value that starts with `-` must
+use the `--message=-text` form.
 
 Standard output is one JSON result. Standard error contains structured errors and,
 for `start`, a `thread_created` recovery record before dispatch. Capture both when
@@ -97,7 +94,8 @@ needs one.
 ## Recovery
 
 - Missing socket: start the daemon or select the correct existing server socket.
-- Unsupported method/schema: check CLI/daemon versions, not repeated task retries.
+- Unsupported method (JSON-RPC -32601): the error names the method; compare CLI and
+  daemon versions instead of retrying the task.
 - Unsupported model/effort: inspect `models`; do not silently substitute the user's
   explicit choice. Access errors can still happen during inference.
 - Send timeout/disconnect: the mutation may have been accepted. Check status and
@@ -109,14 +107,15 @@ needs one.
 
 ## Validation record (2026-11-27)
 
-Shared-daemon smoke tests on App Server 0.172.0 with Node.js 26.8.1 passed: model
-discovery; Sol low task from a stdin task file; status; follow-up from a separate
-invocation; steer accepted and reflected in the final response; interrupt followed by
-persisted `interrupted` status (exit 3); `wait --seconds 0` timeout without
-cancellation (exit 2); Ctrl-C during wait (exit 130, remote turn kept running);
-workspace-write task creating the requested UTF-8 fixture; a 100 KB Chinese prompt and
-its echoed history (64-bit frame lengths both ways); rejection of active follow-up,
-stale-turn steer, idle steer/interrupt, unknown model and unsupported effort; usage
-errors. A local fake server covered ping/pong, fragmented and dribbled frames,
-notifications, a server-initiated request (refused, exit 1), server close and RPC
-timeout. Astra xhigh was checked against the live model catalog, not inference-tested.
+Shared-daemon smoke tests on App Server 0.172.0 with Python 3.9.6 (macOS system
+Python) passed: model discovery; Sol low task from a stdin task file; status;
+follow-up from a separate invocation; steer accepted and reflected in the final
+response; interrupt followed by persisted `interrupted` status (exit 3);
+`wait --seconds 0` timeout without cancellation (exit 2); SIGINT during wait (exit
+130, remote turn kept running); workspace-write task creating the requested UTF-8
+fixture; a 100 KB Chinese prompt; rejection of active follow-up, stale-turn steer,
+idle steer/interrupt, unknown model and unsupported effort; usage errors (Python
+3.8.20). A local fake server (Python 3.8 and 3.9) covered ping/pong, fragmented and
+dribbled frames, a 40 MB message (under 0.5 s), notifications, a server-initiated
+request (refused, exit 1), server close and RPC timeout. Both scripts compile on Python 3.8, 3.9, 3.13 and 3.14. Astra xhigh was
+checked against the live model catalog, not inference-tested.
