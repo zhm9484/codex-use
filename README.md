@@ -28,29 +28,13 @@ codex app-server daemon start
 
 Works with agents that follow the [Agent Skills](https://agentskills.io) format (Claude Code, Codex, Cursor, VS Code / GitHub Copilot, Antigravity, Gemini CLI, OpenCode, and others).
 
-**Using the skills CLI:**
-
 ```bash
 npx skills add zhm9484/codex-use
 ```
 
-**Manual install (no Node.js needed):**
+Or just tell your agent:
 
-Clone the repo into your agent's skills directory as `codex-use`:
-
-```bash
-# Shared cross-agent location (Codex, Antigravity, Gemini CLI, OpenCode, etc.)
-git clone https://github.com/zhm9484/codex-use.git ~/.agents/skills/codex-use
-
-# Claude Code
-git clone https://github.com/zhm9484/codex-use.git ~/.claude/skills/codex-use
-
-# Cursor
-git clone https://github.com/zhm9484/codex-use.git ~/.cursor/skills/codex-use
-
-# Project-local (inside any repo)
-git clone https://github.com/zhm9484/codex-use.git .agents/skills/codex-use
-```
+> Install the skill from https://github.com/zhm9484/codex-use
 
 ## Usage
 
