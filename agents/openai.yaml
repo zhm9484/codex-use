@@ -1,0 +1,5 @@
+interface:
+  display_name: "Codex Use"
+  short_description: "Explicit Codex delegation and session control"
+policy:
+  allow_implicit_invocation: false
