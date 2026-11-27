@@ -45,32 +45,31 @@ it. Report the searched range and anything left unsearched.
 
 The numeric suffix changes with storage migrations, so the client picks the highest
 `state_*.sqlite` and `thread_history_*.sqlite` it finds and selects only columns that
-exist. The history DB was about 4.07 GB when inspected and has no full-text index:
+exist. The history DB can grow to multiple gigabytes and has no full-text index:
 always scope text searches to one thread (and an ordinal range for long threads).
 
 Disk state may lag live work. `thread_history_projection_state` tracks how far a
 rollout has been projected into the history DB, so absence from the history DB is not
-conclusive absence from the rollout; use `rollout` to check. All 2884 local threads
-were `history_mode=paginated` when inspected; older `legacy` threads may exist only
-as rollout JSONL.
+conclusive absence from the rollout; use `rollout` to check. Recent threads normally
+use `history_mode=paginated`; older `legacy` threads may exist only as rollout JSONL.
 
 ## Rollout files and compression
 
-Codex compresses older rollouts with zstd but does NOT update `rollout_path`: on
-2026-11-27, 2813 of 2884 rows pointed at a `.jsonl` path whose file existed only as
-`<rollout_path>.zst` (all archived rows, and unarchived rows last updated a week or
-more earlier). The client resolves the file automatically (`state`: `plain`, `zstd`
-or `missing`) and decompresses with Python 3.14's `compression.zstd` or, on older
-Python, the `zstd` command. Without either, it reports that clearly; plain rollouts
-and all SQLite queries still work.
+Codex compresses older rollouts (archived threads and threads inactive for roughly a
+week or more) with zstd without updating `rollout_path`, leaving a `.jsonl` path whose
+file exists only as `<rollout_path>.zst`. The client resolves the file automatically
+(`state`: `plain`, `zstd` or `missing`) and decompresses with Python 3.14's
+`compression.zstd` or, on older Python, the `zstd` command. Without either, it reports
+that clearly; plain rollouts and all SQLite queries still work.
 
 JSONL lines have `timestamp`, optional `ordinal`, `type` (`session_meta`,
 `event_msg`, `response_item`, …) and `payload` (sometimes `metadata`); the client
 reports these per match. `session_meta.payload` carries ID/cwd/version/history mode
 and may carry `history_base`: forks can inherit history from another rollout, so one
 file is not necessarily the whole logical conversation. Use App Server pagination
-when a local slice is incomplete. Decompressed rollouts reached 322 MB; a scan reads
-the whole file unless `--limit` is reached first, bounded by `--timeout`.
+when a local slice is incomplete. Decompressed rollouts can reach hundreds of
+megabytes; a scan reads the whole file unless `--limit` is reached first, bounded by
+`--timeout`.
 
 ## Schema facts for `sql`
 

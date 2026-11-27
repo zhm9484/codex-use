@@ -75,7 +75,8 @@ class Store:
     def columns(self, name, table):
         key = (name, table)
         if key not in self.cols:
-            self.cols[key] = [r[1] for r in self.db(name).execute('PRAGMA table_info(%s)' % table)]
+            quoted = table.replace('"', '""')
+            self.cols[key] = [r[1] for r in self.db(name).execute('PRAGMA table_info("%s")' % quoted)]
         return self.cols[key]
 
     def has_table(self, name, table):
@@ -192,8 +193,19 @@ def cmd_threads(store, args):
         where.append('archived=?')
         params.append(1 if args.archived else 0)
     if args.cwd:
-        where.append('cwd=?')
-        params.append(str(Path(args.cwd).expanduser().absolute()))
+        p = Path(args.cwd).expanduser()
+        raw = str(p.absolute())
+        candidates = [raw]
+        if p.exists():
+            resolved = str(p.resolve())
+            if resolved != raw:
+                candidates.insert(0, resolved)
+        if len(candidates) == 1:
+            where.append('cwd=?')
+            params.append(candidates[0])
+        else:
+            where.append('cwd IN (?, ?)')
+            params.extend(candidates)
     if args.days > 0:
         where.append('%s>=?' % time_col)
         params.append(int((time.time() - args.days * 86400) * scale))
@@ -345,7 +357,11 @@ class RolloutReader:
     def close(self):
         self.stream.close()
         if self.proc:
-            self.proc.kill()
+            if self.proc.poll() is None:
+                try:
+                    self.proc.kill()
+                except ProcessLookupError:
+                    pass
             self.proc.wait()
 
 

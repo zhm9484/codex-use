@@ -44,9 +44,9 @@ externally active thread on a different server; connect to its owner instead.
 
 - `models`: paginates `model/list`, prints IDs, default/supported efforts.
 - `start`: `thread/start`, optional `thread/name/set`, then `turn/start`. Requires
-  `--cwd`, `--kind`, and either `--message` or `--task-file` (`-` reads stdin).
-  Optional `--model`, `--effort`, `--name`, `--sandbox`. Local inputs (cwd, UTF-8
-  task text) are validated before connecting.
+  `--cwd`, either `--kind` or `--model`, and either `--message` or `--task-file`
+  (`-` reads stdin). Optional `--effort`, `--name`, `--sandbox`. Local inputs (cwd,
+  UTF-8 task text) are validated before connecting.
 - `follow-up ID`: checks idle state, `thread/resume`, validates effective model/effort,
   then `turn/start`. Accepts task input and optional model/effort overrides. It does
   not queue work. Serialize writes to the same thread; an external concurrent sender
@@ -93,7 +93,13 @@ needs one.
 
 ## Recovery
 
+- Missing `codex` CLI: stop and ask the user to install Codex CLI (`npm install -g @openai/codex`
+  or `brew install --cask codex`), sign in, and start the daemon (`codex app-server daemon start`).
+  Do not install global packages without user approval.
 - Missing socket: start the daemon or select the correct existing server socket.
+- Permission denied / `Operation not permitted` on the socket: if the host agent runs
+  shell commands inside a sandbox, allow access to `$CODEX_HOME` (default `~/.codex`)
+  or run the command outside the sandbox.
 - Unsupported method (JSON-RPC -32601): the error names the method; compare CLI and
   daemon versions instead of retrying the task.
 - Unsupported model/effort: inspect `models`; do not silently substitute the user's
@@ -104,18 +110,3 @@ needs one.
 - Stale turn: re-inspect current state. Never automatically change steer into a new turn.
 - History visibility without runtime ownership: find the owning server. Do not use a
   second server to compete with an already active session.
-
-## Validation record (2026-11-27)
-
-Shared-daemon smoke tests on App Server 0.172.0 with Python 3.9.6 (macOS system
-Python) passed: model discovery; Sol low task from a stdin task file; status;
-follow-up from a separate invocation; steer accepted and reflected in the final
-response; interrupt followed by persisted `interrupted` status (exit 3);
-`wait --seconds 0` timeout without cancellation (exit 2); SIGINT during wait (exit
-130, remote turn kept running); workspace-write task creating the requested UTF-8
-fixture; a 100 KB Chinese prompt; rejection of active follow-up, stale-turn steer,
-idle steer/interrupt, unknown model and unsupported effort; usage errors (Python
-3.8.20). A local fake server (Python 3.8 and 3.9) covered ping/pong, fragmented and
-dribbled frames, a 40 MB message (under 0.5 s), notifications, a server-initiated
-request (refused, exit 1), server close and RPC timeout. Both scripts compile on Python 3.8, 3.9, 3.13 and 3.14. Astra xhigh was
-checked against the live model catalog, not inference-tested.

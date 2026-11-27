@@ -55,6 +55,7 @@ class WebSocket:
 
     def __init__(self, path, timeout):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.timeout = timeout
         self.buf = bytearray()
         self.closed = False
         self.close_sent = False
@@ -117,7 +118,7 @@ class WebSocket:
         del self.buf[:n]  # bytearray front deletion is amortized O(1)
         return data
 
-    def _send_frame(self, opcode, payload):
+    def _send_frame(self, opcode, payload, timeout=None):
         if self.closed or self.close_sent:
             raise RPCError('App Server connection is closed; inspect before retrying a mutation.')
         length = len(payload)
@@ -130,8 +131,11 @@ class WebSocket:
         mask = os.urandom(4)
         if opcode == 0x8:
             self.close_sent = True
-        self.sock.settimeout(None)
-        self.sock.sendall(header + mask + _xor(payload, mask))
+        self.sock.settimeout(self.timeout if timeout is None else timeout)
+        try:
+            self.sock.sendall(header + mask + _xor(payload, mask))
+        except socket.timeout:
+            raise RPCTimeout('App Server write timed out; mutation outcome may be unknown. Inspect before retrying.')
 
     def send_text(self, text):
         self._send_frame(0x1, text.encode('utf-8'))
@@ -185,7 +189,7 @@ class WebSocket:
     def close(self):
         if not self.closed and not self.close_sent:
             try:
-                self._send_frame(0x8, struct.pack('!H', 1000))
+                self._send_frame(0x8, struct.pack('!H', 1000), timeout=1)
                 deadline = time.monotonic() + 1
                 while True:  # Drain until the server answers the close frame.
                     self.recv_text(deadline)
@@ -317,9 +321,17 @@ def run(args, connect):
         return {'models': [{k: m.get(k) for k in keys} for m in connect().models()]}
 
     if cmd == 'start':
-        preset_model, preset_effort = PRESETS[args.kind]
-        model = args.model or preset_model
-        effort = args.effort or preset_effort
+        if not args.kind and not args.model:
+            raise UsageError('Provide --kind or --model (run `models` to see available models).')
+        if args.model:
+            model = args.model
+            effort = args.effort
+            preset = False
+        else:
+            preset_model, preset_effort = PRESETS[args.kind]
+            model = preset_model
+            effort = args.effort or preset_effort
+            preset = True
         try:
             cwd = str(Path(args.cwd).expanduser().resolve(strict=True))
         except OSError as e:
@@ -328,18 +340,27 @@ def run(args, connect):
             raise UsageError('cwd must be a directory')
         inputs = text_input(read_prompt(args))
         c = connect()
-        c.validate_model(model, effort, preset=not args.model)
-        started = c.call('thread/start', {'cwd': cwd, 'model': model,
-                                          'config': {'model_reasoning_effort': effort},
-                                          'approvalPolicy': 'never', 'sandbox': args.sandbox,
-                                          'allowProviderModelFallback': False})
+        match = c.validate_model(model, effort, preset=preset)
+        if not effort:
+            effort = match.get('defaultReasoningEffort')
+            supported = [x['reasoningEffort'] for x in match.get('supportedReasoningEfforts') or []]
+            if effort and supported and effort not in supported:
+                raise RPCError('Effort %s is unsupported for %s; supported: %s' % (effort, model, supported))
+        thread_params = {'cwd': cwd, 'model': model, 'approvalPolicy': 'never',
+                         'sandbox': args.sandbox, 'allowProviderModelFallback': False}
+        if effort:
+            thread_params['config'] = {'model_reasoning_effort': effort}
+        started = c.call('thread/start', thread_params)
         tid = started['thread']['id']
         # Emit recovery metadata before a subsequent operation can fail.
         print(json.dumps({'event': 'thread_created', 'threadId': tid, 'cwd': cwd,
                           'model': model, 'effort': effort}, ensure_ascii=False), file=sys.stderr, flush=True)
         if args.name:
             c.call('thread/name/set', {'threadId': tid, 'name': args.name})
-        turn = c.call('turn/start', {'threadId': tid, 'input': inputs, 'model': model, 'effort': effort})['turn']
+        turn_params = {'threadId': tid, 'input': inputs, 'model': model}
+        if effort:
+            turn_params['effort'] = effort
+        turn = c.call('turn/start', turn_params)['turn']
         return {'threadId': tid, 'turnId': turn['id'], 'status': turn['status'],
                 'model': model, 'effort': effort, 'cwd': cwd}
 
@@ -422,15 +443,20 @@ def resolve_socket(explicit):
         return str(default)
     # Ask the CLI where its daemon listens, in case the layout changed.
     codex = shutil.which('codex')
-    if codex:
-        try:
-            out = subprocess.run([codex, 'app-server', 'daemon', 'version'], capture_output=True,
-                                 text=True, timeout=20).stdout
-            path = json.loads(out).get('socketPath')
-            if path and Path(path).exists():
-                return path
-        except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
-            pass
+    if not codex:
+        raise RPCError(
+            'Codex CLI (`codex`) not found on PATH and no App Server socket found at %s. '
+            'Install Codex CLI first (e.g. `npm install -g @openai/codex` or `brew install --cask codex`), '
+            'sign in, then run `codex app-server daemon start` (or pass --sock).' % default
+        )
+    try:
+        out = subprocess.run([codex, 'app-server', 'daemon', 'version'], capture_output=True,
+                             text=True, timeout=20).stdout
+        path = json.loads(out).get('socketPath')
+        if path and Path(path).exists():
+            return path
+    except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
+        pass
     raise RPCError('App Server socket not found at %s. Run `codex app-server daemon start`, '
                    'or pass --sock for another server.' % default)
 
@@ -438,6 +464,15 @@ def resolve_socket(explicit):
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         raise UsageError(message)
+
+
+SUBCOMMAND_HELP = {
+    'follow-up': 'Start another turn on an idle thread',
+    'steer': 'Send mid-turn guidance to an active turn',
+    'interrupt': 'Request cancellation of an active turn',
+    'status': 'Inspect thread state and recent turn summaries',
+    'wait': 'Poll until a turn finishes, needs attention, or times out',
+}
 
 
 def build_parser():
@@ -448,24 +483,26 @@ def build_parser():
     sub.required = True
     sub.add_parser('models', help='List models and supported efforts')
     start = sub.add_parser('start', help='Create a thread and start its first turn')
-    start.add_argument('--cwd', required=True)
-    start.add_argument('--kind', choices=sorted(PRESETS), required=True)
-    start.add_argument('--name')
-    start.add_argument('--sandbox', choices=['read-only', 'workspace-write'], default='read-only')
+    start.add_argument('--cwd', required=True, help='Working directory for the Codex task')
+    start.add_argument('--kind', choices=sorted(PRESETS),
+                       help='Preset model/effort shortcut (optional when --model is set)')
+    start.add_argument('--name', help='Optional display name for the new thread')
+    start.add_argument('--sandbox', choices=['read-only', 'workspace-write'], default='read-only',
+                       help='Sandbox policy for the new thread (default: read-only)')
     for name in ('follow-up', 'steer', 'interrupt', 'status', 'wait'):
-        s = sub.add_parser(name)
-        s.add_argument('thread_id')
+        s = sub.add_parser(name, help=SUBCOMMAND_HELP[name])
+        s.add_argument('thread_id', help='Target thread ID')
         if name in ('steer', 'interrupt', 'wait'):
-            s.add_argument('--turn-id')
+            s.add_argument('--turn-id', help='Target or expected turn ID')
         if name == 'wait':
-            s.add_argument('--seconds', type=float, default=30)
+            s.add_argument('--seconds', type=float, default=30, help='Wait budget in seconds, 0..60 (default: 30)')
     for name in ('start', 'follow-up', 'steer'):
         g = sub.choices[name].add_mutually_exclusive_group(required=True)
-        g.add_argument('--message')
+        g.add_argument('--message', help='Inline task or guidance text')
         g.add_argument('--task-file', help='UTF-8 task file, or - for stdin')
     for name in ('start', 'follow-up'):
         s = sub.choices[name]
-        s.add_argument('--model')
+        s.add_argument('--model', help='Explicit model ID from `models`')
         s.add_argument('--effort', help='Any effort the server catalog lists for the model')
     return p
 

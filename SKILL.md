@@ -6,24 +6,38 @@ description: >
   control Codex sessions through App Server; discover and inspect local history
   read-only. Do not activate for ordinary research, review, or coding without
   explicit Codex delegation.
+license: MIT
+compatibility: >
+  macOS or Linux with Codex CLI App Server daemon (Unix socket) and Python 3.8+
+  standard library. Optional zstd CLI or Python 3.14+ for compressed rollouts.
 ---
 
 # Codex Use
 
-Delegate a bounded task to Codex through a shared App Server. Use the control
-client for execution/control and the history client for discovery/inspection.
+Delegate a bounded task to Codex through a shared App Server. Use
+[scripts/codex_use.py](scripts/codex_use.py) for execution/control and
+[scripts/codex_history.py](scripts/codex_history.py) for discovery/inspection.
 Do not delegate recursively unless the user asks for that. This skill does not
 expand the task's authorization to publish, message others, or change unrelated files.
 
 ## Setup and execution
 
-Both scripts need only Codex CLI and Python 3.8+ standard library; install nothing
-(tested on Python 3.8, 3.9, 3.13 and 3.14). They use the existing Codex login;
-never read auth tokens into prompts or logs.
+Both scripts need only Codex CLI and Python 3.8+ standard library (macOS/Linux;
+Unix socket); install nothing into this skill. Before running execution/control
+commands, check that `codex` is installed (`command -v codex`). If Codex CLI is
+missing and no `--sock` endpoint is provided, stop and ask the user to install
+Codex CLI (e.g. `npm install -g @openai/codex` or `brew install --cask codex`)
+and sign in first—do not install global packages without user approval. The scripts
+use the existing Codex login; never read auth tokens into prompts or logs. If your
+host agent sandboxes shell commands, allow access to `$CODEX_HOME` (default
+`~/.codex`) for the App Server socket and read-only history databases.
 
 ```bash
-S="$HOME/.agents/skills/codex-use/scripts/codex_use.py"       # control (App Server)
-H="$HOME/.agents/skills/codex-use/scripts/codex_history.py"   # local history, read-only
+# Set SKILL_DIR to the directory containing this SKILL.md
+S="$SKILL_DIR/scripts/codex_use.py"       # control (App Server)
+H="$SKILL_DIR/scripts/codex_history.py"   # local history, read-only
+# Check that Codex CLI is available before starting the daemon.
+command -v codex >/dev/null || { echo "Codex CLI not found. Install it first (npm install -g @openai/codex or brew install --cask codex), sign in, then retry." >&2; exit 1; }
 # Run once if the shared daemon is not running; do not restart active work.
 codex app-server daemon start
 python3 "$S" models
@@ -37,21 +51,21 @@ exit codes, lifecycle and troubleshooting.
 
 ## Select the model
 
-| Task kind (`--kind`) | Default model | Effort |
+| Task kind (`--kind`) | Preset model | Effort |
 |---|---|---|
 | `research`: retrieval, research, simple information tasks | `gpt-6.2-sol` | `high` |
 | `simple`: simple review or implementation | `gpt-6.2-sol` | `max` |
 | `complex-review`: complex or large review | `gpt-6.2-astra` | `xhigh` |
 
-User-specified model/effort overrides these defaults. If a preset model is absent
-from the user's catalog, the script stops and lists available models; choose one
-explicitly. For work outside these categories, choose deliberately from `models`;
-do not claim a user default exists. The script validates model and effort against
-the server catalog and never silently substitutes a model. A catalog entry is not a
-guarantee that inference will succeed. If a different user-specified model doesn't
-support the category's default effort, select a supported effort explicitly,
-respecting any user-specified effort. Follow-ups preserve the session's model/effort
-unless explicitly overridden. Steer cannot change the active turn's model or effort.
+`--kind` is a shortcut; pass `--model` (with optional `--effort`) directly without
+`--kind` whenever you want a specific model from `models`. When `--model` is given
+without `--effort`, the script uses that model's catalog default effort if one is
+listed. If a preset model is absent from the user's catalog, the script stops and
+lists available models; choose one explicitly. The script validates model and effort
+against the server catalog and never silently substitutes a model. A catalog entry
+is not a guarantee that inference will succeed. Follow-ups preserve the session's
+model/effort unless explicitly overridden. Steer cannot change the active turn's
+model or effort.
 
 ## Start, follow and steer
 
